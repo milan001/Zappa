@@ -12,6 +12,8 @@ import traceback
 import tarfile
 
 from builtins import str
+
+import botocore
 from werkzeug.wrappers import Response
 
 # This file may be copied into a project's root,
@@ -356,6 +358,13 @@ class LambdaHandler:
 
         # This is the result of a keep alive, recertify
         # or scheduled event.
+
+        if event.get('keep-warm-next-call-event') is not None:
+            next_call_event = event['keep-warm-next-call-event']
+            if next_call_event.get('keep-warm-count') is not None and next_call_event.get('keep-warm-count') > 0:
+                self.call_self(next_call_event, context)
+            return
+
         if event.get('detail-type') == 'Scheduled Event':
 
             whole_function = event['resources'][0].split('/')[-1].split('-')[-1]
@@ -604,6 +613,17 @@ class LambdaHandler:
             content['body'] = json.dumps(str(body), sort_keys=True, indent=4)
             return content
 
+    def call_self(self, event, context):
+        cfg = botocore.config.Config(retries={'max_attempts': 0}, read_timeout=1, connect_timeout=1)
+        if not self.session:
+            boto_session = boto3.Session()
+        else:
+            boto_session = self.session
+        client = boto_session.client('lambda', config=cfg)
+        try:
+            client.invoke(InvocationType='RequestResponse', FunctionName=context.function_name, LogType='Tail', Payload=json.dumps(event))
+        except:
+            logger.error(msg='keep-warm-call timed out')
 
 def lambda_handler(event, context):  # pragma: no cover
     return LambdaHandler.lambda_handler(event, context)
@@ -611,5 +631,10 @@ def lambda_handler(event, context):  # pragma: no cover
 
 def keep_warm_callback(event, context):
     """Method is triggered by the CloudWatch event scheduled when keep_warm setting is set to true."""
-    lambda_handler(event={}, context=context)  # overriding event with an empty one so that web app initialization will
+    local_event = {'keep-warm-next-call-event': event}
+    if event.get('keep-warm-count') is None:
+        local_event['keep-warm-next-call-event']['keep-warm-count'] = 2
+    else:
+        local_event['keep-warm-next-call-event']['keep-warm-count'] = event.get('keep-warm-count') - 1
+    lambda_handler(event=local_event, context=context)  # overriding event with an empty one so that web app initialization will
     # be triggered.
